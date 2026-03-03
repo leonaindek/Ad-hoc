@@ -1,30 +1,17 @@
 import { Router, Request } from "express";
 import { v4 as uuidv4 } from "uuid";
 import multer from "multer";
-import fs from "node:fs";
 import path from "node:path";
-import { readData, writeData } from "../storage.js";
+import { createSupabaseClient } from "../supabase.js";
 
 type DocParams = { goalId: string; taskId: string; docId: string };
 
-const UPLOADS_DIR = path.join(__dirname, "..", "..", "data", "uploads");
-
-const storage = multer.diskStorage({
-  destination(_req, _file, cb) {
-    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-    cb(null, UPLOADS_DIR);
-  },
-  filename(_req, file, cb) {
-    const ext = path.extname(file.originalname);
-    cb(null, `${uuidv4()}${ext}`);
-  },
-});
-
 const ALLOWED_MIMES = ["application/pdf", "image/png", "image/jpeg"];
 
+// Use memory storage — file buffer goes straight to Supabase Storage
 const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter(_req, file, cb) {
     if (ALLOWED_MIMES.includes(file.mimetype)) {
       cb(null, true);
@@ -40,80 +27,110 @@ const router = Router({ mergeParams: true });
 router.post(
   "/",
   upload.single("file"),
-  (req: Request<{ goalId: string; taskId: string }>, res) => {
-    const { goalId, taskId } = req.params;
+  async (req: Request<{ goalId: string; taskId: string }>, res) => {
+    const { taskId } = req.params;
 
     if (!req.file) {
       res.status(400).json({ error: "file is required" });
       return;
     }
 
-    const data = readData();
-    const goal = data.goals.find((g) => g.id === goalId);
-    if (!goal) {
-      res.status(404).json({ error: "Goal not found" });
+    const supabase = createSupabaseClient(req.accessToken);
+
+    // Verify task exists
+    const { data: task } = await supabase.from("tasks").select("id").eq("id", taskId).single();
+    if (!task) { res.status(404).json({ error: "Task not found" }); return; }
+
+    // Upload to Supabase Storage: userId/uuid.ext
+    const ext = path.extname(req.file.originalname);
+    const storedFilename = `${uuidv4()}${ext}`;
+    const storagePath = `${req.userId}/${storedFilename}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("uploads")
+      .upload(storagePath, req.file.buffer, {
+        contentType: req.file.mimetype,
+        upsert: false,
+      });
+
+    if (uploadError) {
+      res.status(500).json({ error: uploadError.message });
       return;
     }
 
-    const task = goal.tasks.find((t) => t.id === taskId);
-    if (!task) {
-      res.status(404).json({ error: "Task not found" });
-      return;
-    }
+    // Store metadata in DB (stored_filename holds the full storage path)
+    const { data: d, error } = await supabase
+      .from("documents")
+      .insert({
+        user_id: req.userId,
+        task_id: taskId,
+        filename: req.file.originalname,
+        stored_filename: storagePath,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
+      })
+      .select()
+      .single();
 
-    if (!task.documents) task.documents = [];
+    if (error) { res.status(500).json({ error: error.message }); return; }
 
-    const doc = {
-      id: uuidv4(),
-      taskId,
-      filename: req.file.originalname,
-      storedFilename: req.file.filename,
-      mimetype: req.file.mimetype,
-      size: req.file.size,
-      uploadedAt: new Date().toISOString(),
-    };
-    task.documents.push(doc);
-    writeData(data);
-    res.status(201).json(doc);
+    res.status(201).json({
+      id: d.id,
+      taskId: d.task_id,
+      filename: d.filename,
+      storedFilename: d.stored_filename,
+      mimetype: d.mimetype,
+      size: d.size,
+      uploadedAt: d.uploaded_at,
+    });
   }
 );
 
+// GET /documents/:docId/file — return a signed URL
+router.get("/:docId/file", async (req: Request<{ docId: string }>, res) => {
+  const supabase = createSupabaseClient(req.accessToken);
+
+  const { data: d } = await supabase
+    .from("documents")
+    .select("stored_filename")
+    .eq("id", req.params.docId)
+    .single();
+
+  if (!d) { res.status(404).json({ error: "Document not found" }); return; }
+
+  const { data: signedData, error } = await supabase.storage
+    .from("uploads")
+    .createSignedUrl(d.stored_filename, 3600); // 1 hour
+
+  if (error || !signedData) {
+    res.status(500).json({ error: error?.message ?? "Failed to create signed URL" });
+    return;
+  }
+
+  res.json({ url: signedData.signedUrl });
+});
+
 // DELETE /goals/:goalId/tasks/:taskId/documents/:docId
-router.delete("/:docId", (req: Request<DocParams>, res) => {
-  const { goalId, taskId, docId } = req.params;
+router.delete("/:docId", async (req: Request<DocParams>, res) => {
+  const { docId } = req.params;
+  const supabase = createSupabaseClient(req.accessToken);
 
-  const data = readData();
-  const goal = data.goals.find((g) => g.id === goalId);
-  if (!goal) {
-    res.status(404).json({ error: "Goal not found" });
-    return;
-  }
+  // Get the document to find the storage path
+  const { data: d } = await supabase
+    .from("documents")
+    .select("stored_filename")
+    .eq("id", docId)
+    .single();
 
-  const task = goal.tasks.find((t) => t.id === taskId);
-  if (!task) {
-    res.status(404).json({ error: "Task not found" });
-    return;
-  }
+  if (!d) { res.status(404).json({ error: "Document not found" }); return; }
 
-  const documents = task.documents ?? [];
-  const index = documents.findIndex((d) => d.id === docId);
-  if (index === -1) {
-    res.status(404).json({ error: "Document not found" });
-    return;
-  }
+  // Delete from Supabase Storage
+  await supabase.storage.from("uploads").remove([d.stored_filename]);
 
-  const [removed] = documents.splice(index, 1);
-  task.documents = documents;
+  // Delete from DB
+  const { error } = await supabase.from("documents").delete().eq("id", docId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
 
-  // Remove the physical file
-  const filePath = path.join(UPLOADS_DIR, removed.storedFilename);
-  try {
-    fs.unlinkSync(filePath);
-  } catch {
-    // File may already be gone — continue
-  }
-
-  writeData(data);
   res.status(204).send();
 });
 

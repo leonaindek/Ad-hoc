@@ -1,10 +1,17 @@
 "use client";
 
 import { useState, useRef } from "react";
+import type { DraggableAttributes } from "@dnd-kit/core";
+import type { SyntheticListenerMap } from "@dnd-kit/core/dist/hooks/utilities";
 import type { Course, Goal, Period, CoursePart, GradingMode, UpdateCoursePayload } from "@/types";
 import { computeProgress } from "@/lib/progress";
 import ProgressBar from "@/components/ProgressBar";
 import Button from "@/components/ui/Button";
+
+type DragHandleProps = {
+  attributes: DraggableAttributes;
+  listeners: SyntheticListenerMap | undefined;
+};
 
 type CourseCardProps = {
   course: Course;
@@ -16,6 +23,7 @@ type CourseCardProps = {
   periodContext?: string;
   onDelete: (id: string) => void;
   onUpdate: (id: string, payload: UpdateCoursePayload) => void;
+  dragHandleProps?: DragHandleProps;
 };
 
 const GRADE_COLORS: Record<string, string> = {
@@ -53,6 +61,7 @@ export default function CourseCard({
   periodContext,
   onDelete,
   onUpdate,
+  dragHandleProps,
 }: CourseCardProps) {
   const [minimised, setMinimised] = useState(false);
   const [expandedGoalId, setExpandedGoalId] = useState<string | null>(null);
@@ -246,8 +255,25 @@ export default function CourseCard({
         </div>
       )}
 
-      {/* Header: collapse + editable title + x button */}
+      {/* Header: drag handle + collapse + editable title + x button */}
       <div className="flex items-center justify-between">
+        {dragHandleProps && (
+          <button
+            className="mr-1 cursor-grab touch-none text-muted hover:text-foreground transition-colors"
+            aria-label="Drag to reorder"
+            {...dragHandleProps.attributes}
+            {...dragHandleProps.listeners}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+              <circle cx="5" cy="3" r="1.5" />
+              <circle cx="11" cy="3" r="1.5" />
+              <circle cx="5" cy="8" r="1.5" />
+              <circle cx="11" cy="8" r="1.5" />
+              <circle cx="5" cy="13" r="1.5" />
+              <circle cx="11" cy="13" r="1.5" />
+            </svg>
+          </button>
+        )}
         <button
           className="mr-2 text-xs text-muted transition-transform duration-150"
           style={{ transform: minimised ? "rotate(0deg)" : "rotate(90deg)" }}

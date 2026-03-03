@@ -1,105 +1,113 @@
 import { Router } from "express";
-import { v4 as uuidv4 } from "uuid";
-import { readData, writeData } from "../storage.js";
+import { createSupabaseClient } from "../supabase.js";
 
 const router = Router();
 
+function mapPeriod(p: Record<string, unknown>) {
+  return {
+    id: p.id,
+    semesterId: p.semester_id,
+    name: p.name,
+    order: p.order,
+    createdAt: p.created_at,
+  };
+}
+
 // GET /periods — optional ?semesterId filter
-router.get("/", (req, res) => {
-  const data = readData();
+router.get("/", async (req, res) => {
+  const supabase = createSupabaseClient(req.accessToken);
   const semesterId = req.query.semesterId as string | undefined;
+
+  let query = supabase.from("periods").select("*").order("order", { ascending: true });
   if (semesterId) {
-    res.json(data.periods.filter((p) => p.semesterId === semesterId));
-  } else {
-    res.json(data.periods);
+    query = query.eq("semester_id", semesterId);
   }
+
+  const { data, error } = await query;
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json((data ?? []).map(mapPeriod));
 });
 
 // POST /periods
-router.post("/", (req, res) => {
+router.post("/", async (req, res) => {
   const { semesterId, name } = req.body;
 
   if (!semesterId || typeof semesterId !== "string") {
-    res.status(400).json({ error: "semesterId is required" });
-    return;
+    res.status(400).json({ error: "semesterId is required" }); return;
   }
   if (!name || typeof name !== "string") {
-    res.status(400).json({ error: "name is required" });
-    return;
+    res.status(400).json({ error: "name is required" }); return;
   }
 
-  const data = readData();
+  const supabase = createSupabaseClient(req.accessToken);
 
-  if (!data.semesters.find((s) => s.id === semesterId)) {
-    res.status(400).json({ error: "Semester not found" });
-    return;
-  }
+  // Verify semester exists
+  const { data: sem } = await supabase.from("semesters").select("id").eq("id", semesterId).single();
+  if (!sem) { res.status(400).json({ error: "Semester not found" }); return; }
 
-  const siblingPeriods = data.periods.filter((p) => p.semesterId === semesterId);
-  const maxOrder = siblingPeriods.reduce((max, p) => Math.max(max, p.order), 0);
+  const { data: existing } = await supabase
+    .from("periods")
+    .select("order")
+    .eq("semester_id", semesterId)
+    .order("order", { ascending: false })
+    .limit(1);
+  const nextOrder = existing && existing.length > 0 ? (existing[0].order ?? 0) + 1 : 1;
 
-  const period = {
-    id: uuidv4(),
-    semesterId,
-    name: name.trim(),
-    order: maxOrder + 1,
-    createdAt: new Date().toISOString(),
-  };
+  const { data: p, error } = await supabase
+    .from("periods")
+    .insert({
+      user_id: req.userId,
+      semester_id: semesterId,
+      name: name.trim(),
+      order: nextOrder,
+    })
+    .select()
+    .single();
 
-  data.periods.push(period);
-  writeData(data);
-  res.status(201).json(period);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(mapPeriod(p));
 });
 
 // PATCH /periods/:id
-router.patch("/:id", (req, res) => {
+router.patch("/:id", async (req, res) => {
   const { name, order } = req.body;
 
-  const data = readData();
-  const period = data.periods.find((p) => p.id === req.params.id);
-  if (!period) {
-    res.status(404).json({ error: "Period not found" });
-    return;
+  if (name !== undefined && (typeof name !== "string" || !name.trim())) {
+    res.status(400).json({ error: "name must be a non-empty string" }); return;
+  }
+  if (order !== undefined && typeof order !== "number") {
+    res.status(400).json({ error: "order must be a number" }); return;
   }
 
-  if (name !== undefined) {
-    if (typeof name !== "string" || !name.trim()) {
-      res.status(400).json({ error: "name must be a non-empty string" });
-      return;
-    }
-    period.name = name.trim();
-  }
+  const supabase = createSupabaseClient(req.accessToken);
 
-  if (order !== undefined) {
-    if (typeof order !== "number") {
-      res.status(400).json({ error: "order must be a number" });
-      return;
-    }
-    period.order = order;
-  }
+  const updates: Record<string, unknown> = {};
+  if (name !== undefined) updates.name = name.trim();
+  if (order !== undefined) updates.order = order;
 
-  writeData(data);
-  res.json(period);
+  const { data: p, error } = await supabase
+    .from("periods")
+    .update(updates)
+    .eq("id", req.params.id)
+    .select()
+    .single();
+
+  if (error || !p) { res.status(404).json({ error: "Period not found" }); return; }
+  res.json(mapPeriod(p));
 });
 
 // DELETE /periods/:id — unassign courses in that period
-router.delete("/:id", (req, res) => {
-  const data = readData();
-  const index = data.periods.findIndex((p) => p.id === req.params.id);
-  if (index === -1) {
-    res.status(404).json({ error: "Period not found" });
-    return;
-  }
+router.delete("/:id", async (req, res) => {
+  const supabase = createSupabaseClient(req.accessToken);
 
   // Unassign courses belonging to this period
-  for (const course of data.courses) {
-    if (course.periodId === req.params.id) {
-      delete course.periodId;
-    }
-  }
+  await supabase
+    .from("courses")
+    .update({ period_id: null })
+    .eq("period_id", req.params.id);
 
-  data.periods.splice(index, 1);
-  writeData(data);
+  const { error } = await supabase.from("periods").delete().eq("id", req.params.id);
+  if (error) { res.status(500).json({ error: error.message }); return; }
   res.status(204).send();
 });
 

@@ -2,7 +2,8 @@
 
 import { useCallback, useMemo, useState, useRef } from "react";
 import type { Goal, Task, UpdateGoalPayload } from "@/types";
-import { DndContext, closestCenter, type DragEndEvent } from "@dnd-kit/core";
+import { DndContext, closestCenter, type DragEndEvent, type DraggableAttributes } from "@dnd-kit/core";
+import type { SyntheticListenerMap } from "@dnd-kit/core/dist/hooks/utilities";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { computeProgress } from "@/lib/progress";
 import { formatDate, isOverdue } from "@/lib/dates";
@@ -10,6 +11,11 @@ import ProgressBar from "@/components/ProgressBar";
 import TaskItem from "@/components/TaskItem";
 import AddTaskForm from "@/components/AddTaskForm";
 import Button from "@/components/ui/Button";
+
+type DragHandleProps = {
+  attributes: DraggableAttributes;
+  listeners: SyntheticListenerMap | undefined;
+};
 
 type GoalCardProps = {
   goal: Goal;
@@ -20,6 +26,7 @@ type GoalCardProps = {
   onUpdateTask: (goalId: string, taskId: string, title: string, weight: number, dueDate?: string) => void;
   onDeleteTask: (goalId: string, taskId: string) => void;
   onReorderTasks: (goalId: string, taskIds: string[]) => void;
+  dragHandleProps?: DragHandleProps;
 };
 
 export default function GoalCard({
@@ -31,6 +38,7 @@ export default function GoalCard({
   onUpdateTask,
   onDeleteTask,
   onReorderTasks,
+  dragHandleProps,
 }: GoalCardProps) {
   const progress = computeProgress(goal.tasks);
   const overdue = goal.dueDate && isOverdue(goal.dueDate);
@@ -74,6 +82,23 @@ export default function GoalCard({
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface-1 p-5 shadow-sm hover:shadow-md transition-shadow duration-200">
       <div className="flex items-center justify-between">
+        {dragHandleProps && (
+          <button
+            className="mr-1 cursor-grab touch-none text-muted hover:text-foreground transition-colors"
+            aria-label="Drag to reorder"
+            {...dragHandleProps.attributes}
+            {...dragHandleProps.listeners}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+              <circle cx="5" cy="3" r="1.5" />
+              <circle cx="11" cy="3" r="1.5" />
+              <circle cx="5" cy="8" r="1.5" />
+              <circle cx="11" cy="8" r="1.5" />
+              <circle cx="5" cy="13" r="1.5" />
+              <circle cx="11" cy="13" r="1.5" />
+            </svg>
+          </button>
+        )}
         <button
           className="mr-2 text-xs text-muted transition-transform duration-150"
           style={{ transform: minimised ? "rotate(0deg)" : "rotate(90deg)" }}

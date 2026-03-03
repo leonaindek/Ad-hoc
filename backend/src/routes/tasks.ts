@@ -1,6 +1,5 @@
 import { Router, Request } from "express";
-import { v4 as uuidv4 } from "uuid";
-import { readData, writeData } from "../storage.js";
+import { createSupabaseClient } from "../supabase.js";
 import substepRouter from "./substeps.js";
 import documentRouter from "./documents.js";
 
@@ -9,8 +8,8 @@ type TaskParams = { goalId: string; taskId: string };
 
 const router = Router({ mergeParams: true });
 
-// PUT /goals/:goalId/tasks/reorder — must be before /:taskId routes
-router.put("/reorder", (req: Request<GoalParams>, res) => {
+// PUT /goals/:goalId/tasks/reorder
+router.put("/reorder", async (req: Request<GoalParams>, res) => {
   const { goalId } = req.params;
   const { taskIds } = req.body;
 
@@ -19,24 +18,32 @@ router.put("/reorder", (req: Request<GoalParams>, res) => {
     return;
   }
 
-  const data = readData();
-  const goal = data.goals.find((g) => g.id === goalId);
-  if (!goal) {
-    res.status(404).json({ error: "Goal not found" });
-    return;
-  }
+  const supabase = createSupabaseClient(req.accessToken);
 
-  const existingIds = new Set(goal.tasks.map((t) => t.id));
+  // Verify all tasks belong to this goal
+  const { data: existing } = await supabase
+    .from("tasks")
+    .select("id")
+    .eq("goal_id", goalId);
+
+  const existingIds = new Set((existing ?? []).map((t: { id: string }) => t.id));
   const incomingIds = new Set(taskIds as string[]);
   if (existingIds.size !== incomingIds.size || ![...existingIds].every((id) => incomingIds.has(id))) {
     res.status(400).json({ error: "taskIds must contain exactly all task IDs for this goal" });
     return;
   }
 
-  const taskMap = new Map(goal.tasks.map((t) => [t.id, t]));
-  goal.tasks = (taskIds as string[]).map((id) => taskMap.get(id)!);
-  writeData(data);
-  res.json(goal.tasks);
+  for (let i = 0; i < taskIds.length; i++) {
+    await supabase.from("tasks").update({ order: i }).eq("id", taskIds[i]);
+  }
+
+  const { data: tasks } = await supabase
+    .from("tasks")
+    .select("*, substeps(*), documents(*)")
+    .eq("goal_id", goalId)
+    .order("order", { ascending: true });
+
+  res.json((tasks ?? []).map(mapTask));
 });
 
 // Nest substep and document routes
@@ -44,7 +51,7 @@ router.use("/:taskId/substeps", substepRouter);
 router.use("/:taskId/documents", documentRouter);
 
 // POST /goals/:goalId/tasks
-router.post("/", (req: Request<GoalParams>, res) => {
+router.post("/", async (req: Request<GoalParams>, res) => {
   const { goalId } = req.params;
   const { title, weight, dueDate } = req.body;
 
@@ -63,33 +70,53 @@ router.post("/", (req: Request<GoalParams>, res) => {
     }
   }
 
-  const data = readData();
-  const goal = data.goals.find((g) => g.id === goalId);
-  if (!goal) {
-    res.status(404).json({ error: "Goal not found" });
-    return;
-  }
+  const supabase = createSupabaseClient(req.accessToken);
 
-  const task: Record<string, unknown> = {
-    id: uuidv4(),
-    goalId,
-    title: title.trim(),
-    weight,
-    completed: false,
-    createdAt: new Date().toISOString(),
-  };
-  if (dueDate) task.dueDate = dueDate;
-  goal.tasks.push(task as typeof goal.tasks[number]);
-  writeData(data);
-  res.status(201).json(task);
+  // Verify goal exists
+  const { data: goal } = await supabase.from("goals").select("id").eq("id", goalId).single();
+  if (!goal) { res.status(404).json({ error: "Goal not found" }); return; }
+
+  // Get max order
+  const { data: existing } = await supabase
+    .from("tasks")
+    .select("order")
+    .eq("goal_id", goalId)
+    .order("order", { ascending: false })
+    .limit(1);
+  const nextOrder = existing && existing.length > 0 ? (existing[0].order ?? 0) + 1 : 0;
+
+  const { data: t, error } = await supabase
+    .from("tasks")
+    .insert({
+      user_id: req.userId,
+      goal_id: goalId,
+      title: title.trim(),
+      weight,
+      completed: false,
+      due_date: dueDate || null,
+      order: nextOrder,
+    })
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  res.status(201).json({
+    id: t.id,
+    goalId: t.goal_id,
+    title: t.title,
+    weight: t.weight,
+    completed: t.completed,
+    ...(t.due_date ? { dueDate: t.due_date } : {}),
+    createdAt: t.created_at,
+  });
 });
 
 // PATCH /goals/:goalId/tasks/:taskId
-router.patch("/:taskId", (req: Request<TaskParams>, res) => {
-  const { goalId, taskId } = req.params;
+router.patch("/:taskId", async (req: Request<TaskParams>, res) => {
+  const { taskId } = req.params;
   const { title, weight, completed, dueDate } = req.body;
 
-  // Validate optional fields if provided
   if (title !== undefined && (typeof title !== "string" || title.trim().length === 0)) {
     res.status(400).json({ error: "title must be a non-empty string" });
     return;
@@ -109,52 +136,70 @@ router.patch("/:taskId", (req: Request<TaskParams>, res) => {
     }
   }
 
-  const data = readData();
-  const goal = data.goals.find((g) => g.id === goalId);
-  if (!goal) {
-    res.status(404).json({ error: "Goal not found" });
-    return;
-  }
+  const supabase = createSupabaseClient(req.accessToken);
 
-  const task = goal.tasks.find((t) => t.id === taskId);
-  if (!task) {
-    res.status(404).json({ error: "Task not found" });
-    return;
-  }
+  const updates: Record<string, unknown> = {};
+  if (title !== undefined) updates.title = title.trim();
+  if (weight !== undefined) updates.weight = weight;
+  if (completed !== undefined) updates.completed = completed;
+  if (dueDate === null) updates.due_date = null;
+  else if (dueDate !== undefined) updates.due_date = dueDate;
 
-  if (title !== undefined) task.title = title.trim();
-  if (weight !== undefined) task.weight = weight;
-  if (completed !== undefined) task.completed = completed;
-  if (dueDate === null) {
-    delete task.dueDate;
-  } else if (dueDate !== undefined) {
-    task.dueDate = dueDate;
-  }
+  const { data: t, error } = await supabase
+    .from("tasks")
+    .update(updates)
+    .eq("id", taskId)
+    .select()
+    .single();
 
-  writeData(data);
-  res.json(task);
+  if (error || !t) { res.status(404).json({ error: "Task not found" }); return; }
+
+  res.json({
+    id: t.id,
+    goalId: t.goal_id,
+    title: t.title,
+    weight: t.weight,
+    completed: t.completed,
+    ...(t.due_date ? { dueDate: t.due_date } : {}),
+    createdAt: t.created_at,
+  });
 });
 
 // DELETE /goals/:goalId/tasks/:taskId
-router.delete("/:taskId", (req: Request<TaskParams>, res) => {
-  const { goalId, taskId } = req.params;
-
-  const data = readData();
-  const goal = data.goals.find((g) => g.id === goalId);
-  if (!goal) {
-    res.status(404).json({ error: "Goal not found" });
-    return;
-  }
-
-  const index = goal.tasks.findIndex((t) => t.id === taskId);
-  if (index === -1) {
-    res.status(404).json({ error: "Task not found" });
-    return;
-  }
-
-  goal.tasks.splice(index, 1);
-  writeData(data);
+router.delete("/:taskId", async (req: Request<TaskParams>, res) => {
+  const { taskId } = req.params;
+  const supabase = createSupabaseClient(req.accessToken);
+  const { error } = await supabase.from("tasks").delete().eq("id", taskId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
   res.status(204).send();
 });
+
+function mapTask(t: Record<string, unknown>) {
+  return {
+    id: t.id,
+    goalId: t.goal_id,
+    title: t.title,
+    weight: t.weight,
+    completed: t.completed,
+    ...(t.due_date ? { dueDate: t.due_date } : {}),
+    createdAt: t.created_at,
+    substeps: ((t.substeps as Record<string, unknown>[] | null) ?? []).map((s) => ({
+      id: s.id,
+      taskId: s.task_id,
+      title: s.title,
+      completed: s.completed,
+      createdAt: s.created_at,
+    })),
+    documents: ((t.documents as Record<string, unknown>[] | null) ?? []).map((d) => ({
+      id: d.id,
+      taskId: d.task_id,
+      filename: d.filename,
+      storedFilename: d.stored_filename,
+      mimetype: d.mimetype,
+      size: d.size,
+      uploadedAt: d.uploaded_at,
+    })),
+  };
+}
 
 export default router;

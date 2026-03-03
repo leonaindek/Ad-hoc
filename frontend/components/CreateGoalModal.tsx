@@ -8,15 +8,16 @@ import Input from "@/components/ui/Input";
 type CreateGoalModalProps = {
   open: boolean;
   onClose: () => void;
-  onCreate: (title: string, dueDate?: string) => void;
+  onCreate: (title: string, dueDate?: string) => Promise<void>;
 };
 
 export default function CreateGoalModal({ open, onClose, onCreate }: CreateGoalModalProps) {
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const trimmed = title.trim();
     if (!trimmed) {
@@ -24,9 +25,16 @@ export default function CreateGoalModal({ open, onClose, onCreate }: CreateGoalM
       return;
     }
     setError("");
-    onCreate(trimmed, dueDate || undefined);
-    setTitle("");
-    setDueDate("");
+    setIsSubmitting(true);
+    try {
+      await onCreate(trimmed, dueDate || undefined);
+      setTitle("");
+      setDueDate("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create goal");
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   function handleClose() {
@@ -62,7 +70,9 @@ export default function CreateGoalModal({ open, onClose, onCreate }: CreateGoalM
           <Button type="button" variant="secondary" onClick={handleClose}>
             Cancel
           </Button>
-          <Button type="submit">Create</Button>
+          <Button type="submit" disabled={isSubmitting}>
+            {isSubmitting ? "Creating…" : "Create"}
+          </Button>
         </div>
       </form>
     </Modal>

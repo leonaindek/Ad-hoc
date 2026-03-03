@@ -1,12 +1,14 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useId } from "react";
 import type { Goal, Task, UpdateGoalPayload } from "@/types";
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
+import { SortableContext, rectSortingStrategy } from "@dnd-kit/sortable";
 import { api } from "@/lib/api";
-import GoalCard from "@/components/GoalCard";
+import SortableGoalCard from "@/components/SortableGoalCard";
 import CreateGoalModal from "@/components/CreateGoalModal";
 import Button from "@/components/ui/Button";
-import WeeklySummary from "@/components/WeeklySummary";
+import DashboardCard from "@/components/DashboardCard";
 
 function ShimmerCard() {
   return (
@@ -27,6 +29,38 @@ export default function GoalsDashboard() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const dndId = useId();
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
+  );
+
+  const sortedGoals = [...goals].sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity));
+
+  const handleGoalDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+
+      const oldIndex = sortedGoals.findIndex((g) => g.id === active.id);
+      const newIndex = sortedGoals.findIndex((g) => g.id === over.id);
+      if (oldIndex === -1 || newIndex === -1) return;
+
+      const reordered = [...sortedGoals];
+      const [moved] = reordered.splice(oldIndex, 1);
+      reordered.splice(newIndex, 0, moved);
+      const goalIds = reordered.map((g) => g.id);
+
+      // Optimistic update
+      setGoals(reordered.map((g, i) => ({ ...g, order: i })));
+      api.reorderGoals(goalIds).catch(async () => {
+        setError("Failed to reorder goals");
+        const fresh = await api.getGoals();
+        setGoals(fresh);
+      });
+    },
+    [sortedGoals]
+  );
 
   useEffect(() => {
     api
@@ -36,14 +70,10 @@ export default function GoalsDashboard() {
       .finally(() => setIsLoading(false));
   }, []);
 
-  async function handleCreateGoal(title: string) {
-    try {
-      const goal = await api.createGoal({ title });
-      setGoals((prev) => [...prev, goal]);
-      setShowCreateModal(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create goal");
-    }
+  async function handleCreateGoal(title: string, dueDate?: string) {
+    const goal = await api.createGoal({ title, dueDate });
+    setGoals((prev) => [...prev, goal]);
+    setShowCreateModal(false);
   }
 
   async function handleUpdateGoal(goalId: string, payload: UpdateGoalPayload) {
@@ -153,7 +183,7 @@ export default function GoalsDashboard() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
-      <WeeklySummary />
+      <DashboardCard goals={goals} onToggleTask={handleToggleTask} />
 
       <div className="mb-8 flex items-center justify-end">
         <Button onClick={() => setShowCreateModal(true)}>+ New Goal</Button>
@@ -184,21 +214,30 @@ export default function GoalsDashboard() {
           <p className="text-sm text-muted">Click &quot;+ New Goal&quot; to get started.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          {goals.map((goal) => (
-            <GoalCard
-              key={goal.id}
-              goal={goal}
-              onDeleteGoal={handleDeleteGoal}
-              onUpdateGoal={handleUpdateGoal}
-              onAddTask={handleAddTask}
-              onToggleTask={handleToggleTask}
-              onUpdateTask={handleUpdateTask}
-              onDeleteTask={handleDeleteTask}
-              onReorderTasks={handleReorderTasks}
-            />
-          ))}
-        </div>
+        <DndContext
+          id={dndId}
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragEnd={handleGoalDragEnd}
+        >
+          <SortableContext items={sortedGoals.map((g) => g.id)} strategy={rectSortingStrategy}>
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+              {sortedGoals.map((goal) => (
+                <SortableGoalCard
+                  key={goal.id}
+                  goal={goal}
+                  onDeleteGoal={handleDeleteGoal}
+                  onUpdateGoal={handleUpdateGoal}
+                  onAddTask={handleAddTask}
+                  onToggleTask={handleToggleTask}
+                  onUpdateTask={handleUpdateTask}
+                  onDeleteTask={handleDeleteTask}
+                  onReorderTasks={handleReorderTasks}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
       )}
 
       <CreateGoalModal

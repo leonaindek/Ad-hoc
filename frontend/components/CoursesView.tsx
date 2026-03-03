@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef, useId } from "react";
 import type {
   Course,
   Goal,
@@ -11,9 +11,25 @@ import type {
   CreateSemesterPayload,
   CreatePeriodPayload,
 } from "@/types";
+import {
+  DndContext,
+  closestCenter,
+  rectIntersection,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragOverlay,
+  type DragStartEvent,
+  type DragOverEvent,
+  type DragEndEvent,
+  type CollisionDetection,
+} from "@dnd-kit/core";
+import { SortableContext, rectSortingStrategy } from "@dnd-kit/sortable";
 import { api } from "@/lib/api";
 import GPADisplay from "@/components/GPADisplay";
+import SortableCourseCard from "@/components/SortableCourseCard";
 import CourseCard from "@/components/CourseCard";
+import DroppableContainer from "@/components/DroppableContainer";
 import CreateCourseModal from "@/components/CreateCourseModal";
 import CreateSemesterModal from "@/components/CreateSemesterModal";
 import CreatePeriodModal from "@/components/CreatePeriodModal";
@@ -45,6 +61,17 @@ export default function CoursesView() {
   const [showCreatePeriod, setShowCreatePeriod] = useState(false);
   const [createPeriodSemesterId, setCreatePeriodSemesterId] = useState("");
 
+  // Drag state
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const startContainerRef = useRef<string | null>(null);
+  const lastOverContainerRef = useRef<string | null>(null);
+  const coursesBeforeDragRef = useRef<Course[]>([]);
+
+  const dndId = useId();
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
+  );
+
   useEffect(() => {
     Promise.all([api.getCourses(), api.getGoals(), api.getSemesters(), api.getPeriods()])
       .then(([coursesData, goalsData, semestersData, periodsData]) => {
@@ -55,6 +82,29 @@ export default function CoursesView() {
       })
       .catch((err) => setError(err.message))
       .finally(() => setIsLoading(false));
+  }, []);
+
+  // --- Helpers ---
+
+  function findContainer(id: string | number): string | null {
+    const sid = String(id);
+    if (sid === "unassigned" || sid.startsWith("period:")) return sid;
+    // It's a course id — look up its container
+    const course = courses.find((c) => c.id === sid);
+    if (!course) return null;
+    return course.periodId ? `period:${course.periodId}` : "unassigned";
+  }
+
+  function containerToPeriodId(container: string): string | undefined {
+    if (container === "unassigned") return undefined;
+    return container.replace("period:", "");
+  }
+
+  // Custom collision detection: try closestCenter first, fall back to rectIntersection
+  const collisionDetection: CollisionDetection = useCallback((args) => {
+    const centerResult = closestCenter(args);
+    if (centerResult.length > 0) return centerResult;
+    return rectIntersection(args);
   }, []);
 
   // --- Handlers ---
@@ -110,10 +160,8 @@ export default function CoursesView() {
     try {
       await api.deleteSemester(id);
       setSemesters((prev) => prev.filter((s) => s.id !== id));
-      // Remove child periods from state
       const removedPeriodIds = new Set(periods.filter((p) => p.semesterId === id).map((p) => p.id));
       setPeriods((prev) => prev.filter((p) => p.semesterId !== id));
-      // Unassign courses in those periods (including parts)
       setCourses((prev) =>
         prev.map((c) => {
           if (c.parts && c.parts.length > 0) {
@@ -163,7 +211,6 @@ export default function CoursesView() {
     try {
       await api.deletePeriod(id);
       setPeriods((prev) => prev.filter((p) => p.id !== id));
-      // Unassign courses in that period (including parts)
       setCourses((prev) =>
         prev.map((c) => {
           if (c.parts && c.parts.length > 0) {
@@ -186,6 +233,26 @@ export default function CoursesView() {
     }
   }
 
+  const handleReorderCourses = useCallback(
+    async (courseIds: string[]) => {
+      setCourses((prev) => {
+        return prev.map((c) => {
+          const idx = courseIds.indexOf(c.id);
+          if (idx !== -1) return { ...c, order: idx };
+          return c;
+        });
+      });
+      try {
+        await api.reorderCourses(courseIds);
+      } catch {
+        setError("Failed to reorder courses");
+        const fresh = await api.getCourses();
+        setCourses(fresh);
+      }
+    },
+    []
+  );
+
   function openNewCourse(periodId?: string) {
     setCreateCoursePeriodId(periodId);
     setShowCreateCourse(true);
@@ -196,15 +263,116 @@ export default function CoursesView() {
     setShowCreatePeriod(true);
   }
 
+  // --- DnD handlers ---
+
+  function handleDragStart(event: DragStartEvent) {
+    const id = String(event.active.id);
+    setActiveId(id);
+    const container = findContainer(id);
+    startContainerRef.current = container;
+    lastOverContainerRef.current = container;
+    coursesBeforeDragRef.current = courses;
+  }
+
+  function handleDragOver(event: DragOverEvent) {
+    const { active, over } = event;
+    if (!over) return;
+
+    const activeContainer = findContainer(active.id);
+    const overContainer = findContainer(over.id);
+
+    if (!activeContainer || !overContainer || activeContainer === overContainer) return;
+
+    // Guard: skip split courses
+    const activeCourse = courses.find((c) => c.id === String(active.id));
+    if (!activeCourse || (activeCourse.parts && activeCourse.parts.length > 0)) return;
+
+    // Avoid redundant updates
+    if (lastOverContainerRef.current === overContainer) return;
+    lastOverContainerRef.current = overContainer;
+
+    // Optimistically move the course to the new container
+    const newPeriodId = containerToPeriodId(overContainer);
+    setCourses((prev) =>
+      prev.map((c) =>
+        c.id === String(active.id) ? { ...c, periodId: newPeriodId } : c
+      )
+    );
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    const draggedId = String(active.id);
+
+    setActiveId(null);
+
+    if (!over) {
+      // Cancelled — revert
+      setCourses(coursesBeforeDragRef.current);
+      startContainerRef.current = null;
+      lastOverContainerRef.current = null;
+      return;
+    }
+
+    const startContainer = startContainerRef.current;
+    const endContainer = findContainer(active.id);
+
+    startContainerRef.current = null;
+    lastOverContainerRef.current = null;
+
+    if (!startContainer || !endContainer) return;
+
+    if (startContainer !== endContainer) {
+      // Cross-container move — persist to backend
+      const newPeriodId = containerToPeriodId(endContainer);
+      handleUpdateCourse(draggedId, { periodId: newPeriodId ?? null });
+    } else {
+      // Same container — check for reorder
+      const overId = String(over.id);
+      if (overId !== draggedId && !overId.startsWith("period:") && overId !== "unassigned") {
+        // Reorder within container
+        const containerPeriodId = containerToPeriodId(endContainer);
+        const containerCourses = courses
+          .filter((c) => {
+            if (c.parts && c.parts.length > 0) return false;
+            if (containerPeriodId) return c.periodId === containerPeriodId;
+            return !c.periodId;
+          })
+          .sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity));
+
+        const oldIndex = containerCourses.findIndex((c) => c.id === draggedId);
+        const newIndex = containerCourses.findIndex((c) => c.id === overId);
+        if (oldIndex !== -1 && newIndex !== -1 && oldIndex !== newIndex) {
+          const reordered = [...containerCourses];
+          const [moved] = reordered.splice(oldIndex, 1);
+          reordered.splice(newIndex, 0, moved);
+          handleReorderCourses(reordered.map((c) => c.id));
+        }
+      }
+    }
+  }
+
+  function handleDragCancel() {
+    setActiveId(null);
+    setCourses(coursesBeforeDragRef.current);
+    startContainerRef.current = null;
+    lastOverContainerRef.current = null;
+  }
+
   // --- Derived data ---
   const sortedSemesters = [...semesters].sort((a, b) => a.order - b.order);
-  // Unassigned: no periodId AND (no parts OR all parts unassigned)
-  const unassignedCourses = courses.filter((c) => {
-    if (c.parts && c.parts.length > 0) {
-      return c.parts.every((p) => !p.periodId);
-    }
-    return !c.periodId;
-  });
+  const unassignedCourses = courses
+    .filter((c) => {
+      if (c.parts && c.parts.length > 0) {
+        return c.parts.every((p) => !p.periodId);
+      }
+      return !c.periodId;
+    })
+    .sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity));
+
+  const activeCourse = activeId ? courses.find((c) => c.id === activeId) : null;
+  const isDragActive = activeId !== null;
+  const showUnassigned = unassignedCourses.length > 0 || isDragActive;
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
@@ -241,75 +409,113 @@ export default function CoursesView() {
           <ShimmerCard />
         </div>
       ) : (
-        <div className="flex flex-col gap-6">
-          {/* Semester hierarchy */}
-          {sortedSemesters.map((semester) => {
-            const semesterPeriods = periods.filter((p) => p.semesterId === semester.id);
-            return (
-              <SemesterSection
-                key={semester.id}
-                semester={semester}
-                periods={semesterPeriods}
-                courses={courses}
-                goals={goals}
-                allCourses={courses}
-                allPeriods={periods}
-                allSemesters={semesters}
-                onUpdateSemester={handleUpdateSemester}
-                onDeleteSemester={handleDeleteSemester}
-                onUpdatePeriod={handleUpdatePeriod}
-                onDeletePeriod={handleDeletePeriod}
-                onDeleteCourse={handleDeleteCourse}
-                onUpdateCourse={handleUpdateCourse}
-                onNewCourse={openNewCourse}
-                onNewPeriod={openNewPeriod}
-              />
-            );
-          })}
+        <DndContext
+          id={dndId}
+          sensors={sensors}
+          collisionDetection={collisionDetection}
+          onDragStart={handleDragStart}
+          onDragOver={handleDragOver}
+          onDragEnd={handleDragEnd}
+          onDragCancel={handleDragCancel}
+        >
+          <div className="flex flex-col gap-6">
+            {/* Semester hierarchy */}
+            {sortedSemesters.map((semester) => {
+              const semesterPeriods = periods.filter((p) => p.semesterId === semester.id);
+              return (
+                <SemesterSection
+                  key={semester.id}
+                  semester={semester}
+                  periods={semesterPeriods}
+                  courses={courses}
+                  goals={goals}
+                  allCourses={courses}
+                  allPeriods={periods}
+                  allSemesters={semesters}
+                  onUpdateSemester={handleUpdateSemester}
+                  onDeleteSemester={handleDeleteSemester}
+                  onUpdatePeriod={handleUpdatePeriod}
+                  onDeletePeriod={handleDeletePeriod}
+                  onDeleteCourse={handleDeleteCourse}
+                  onUpdateCourse={handleUpdateCourse}
+                  onNewCourse={openNewCourse}
+                  onNewPeriod={openNewPeriod}
+                  onReorderCourses={handleReorderCourses}
+                  isDragActive={isDragActive}
+                />
+              );
+            })}
 
-          {/* Unassigned courses */}
-          {unassignedCourses.length > 0 && (
-            <div>
-              <div className="flex items-center gap-3 mb-4">
-                <div className="h-px flex-1 bg-border" />
-                <span className="text-sm font-medium text-muted">Unassigned Courses</span>
-                <div className="h-px flex-1 bg-border" />
-                <Button
-                  variant="ghost"
-                  className="!px-2 !py-0.5 text-xs"
-                  onClick={() => openNewCourse()}
-                >
-                  + New Course
-                </Button>
+            {/* Unassigned courses */}
+            {showUnassigned && (
+              <div>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="h-px flex-1 bg-border" />
+                  <span className="text-sm font-medium text-muted">Unassigned Courses</span>
+                  <div className="h-px flex-1 bg-border" />
+                  <Button
+                    variant="ghost"
+                    className="!px-2 !py-0.5 text-xs"
+                    onClick={() => openNewCourse()}
+                  >
+                    + New Course
+                  </Button>
+                </div>
+                <DroppableContainer id="unassigned">
+                  <SortableContext items={unassignedCourses.map((c) => c.id)} strategy={rectSortingStrategy}>
+                    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 min-h-[60px]">
+                      {unassignedCourses.length === 0 && isDragActive && (
+                        <div className="col-span-full flex items-center justify-center rounded-lg border-2 border-dashed border-border text-sm text-muted py-4">
+                          Drop courses here
+                        </div>
+                      )}
+                      {unassignedCourses.map((course) => (
+                        <SortableCourseCard
+                          key={course.id}
+                          course={course}
+                          goals={goals}
+                          allCourses={courses}
+                          allPeriods={periods}
+                          allSemesters={semesters}
+                          onDelete={handleDeleteCourse}
+                          onUpdate={handleUpdateCourse}
+                        />
+                      ))}
+                    </div>
+                  </SortableContext>
+                </DroppableContainer>
               </div>
-              <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-                {unassignedCourses.map((course) => (
-                  <CourseCard
-                    key={course.id}
-                    course={course}
-                    goals={goals}
-                    allCourses={courses}
-                    allPeriods={periods}
-                    allSemesters={semesters}
-                    onDelete={handleDeleteCourse}
-                    onUpdate={handleUpdateCourse}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
+            )}
 
-          {/* Empty state */}
-          {courses.length === 0 && semesters.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-16 text-center">
-              <p className="mb-2 text-4xl">📚</p>
-              <p className="text-lg font-medium text-foreground">No courses yet</p>
-              <p className="text-sm text-muted">
-                Create a semester to organize your courses, or add a course directly.
-              </p>
-            </div>
-          )}
-        </div>
+            {/* Empty state */}
+            {courses.length === 0 && semesters.length === 0 && (
+              <div className="flex flex-col items-center justify-center py-16 text-center">
+                <p className="mb-2 text-4xl">📚</p>
+                <p className="text-lg font-medium text-foreground">No courses yet</p>
+                <p className="text-sm text-muted">
+                  Create a semester to organize your courses, or add a course directly.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Drag overlay — floating card preview */}
+          <DragOverlay>
+            {activeCourse ? (
+              <div className="rotate-2 scale-105">
+                <CourseCard
+                  course={activeCourse}
+                  goals={goals}
+                  allCourses={courses}
+                  allPeriods={periods}
+                  allSemesters={semesters}
+                  onDelete={() => {}}
+                  onUpdate={() => {}}
+                />
+              </div>
+            ) : null}
+          </DragOverlay>
+        </DndContext>
       )}
 
       {/* Modals */}

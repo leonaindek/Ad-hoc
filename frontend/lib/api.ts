@@ -4,6 +4,7 @@ import type {
   Substep,
   TaskDocument,
   StudySession,
+  StudyTimeGoal,
   Course,
   Semester,
   Period,
@@ -15,6 +16,8 @@ import type {
   UpdateSubstepPayload,
   CreateSessionPayload,
   UpdateSessionPayload,
+  CreateStudyTimeGoalPayload,
+  UpdateStudyTimeGoalPayload,
   CreateCoursePayload,
   UpdateCoursePayload,
   CreateSemesterPayload,
@@ -22,16 +25,26 @@ import type {
   CreatePeriodPayload,
   UpdatePeriodPayload,
 } from "@/types";
+import { createClient } from "@/lib/supabase/client";
 
-const BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
+
+async function getAccessToken(): Promise<string> {
+  const supabase = createClient();
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.access_token ?? "";
+}
 
 async function request<T>(
   path: string,
   options?: RequestInit
 ): Promise<T> {
+  const token = await getAccessToken();
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
     ...options,
   });
   if (!res.ok) {
@@ -60,6 +73,12 @@ export const api = {
 
   deleteGoal: (id: string) =>
     request<void>(`/goals/${id}`, { method: "DELETE" }),
+
+  reorderGoals: (goalIds: string[]) =>
+    request<Goal[]>("/goals/reorder", {
+      method: "PUT",
+      body: JSON.stringify({ goalIds }),
+    }),
 
   createTask: (goalId: string, payload: Omit<CreateTaskPayload, "goalId">) =>
     request<Task>(`/goals/${goalId}/tasks`, {
@@ -100,10 +119,14 @@ export const api = {
 
   // Documents
   async uploadDocument(goalId: string, taskId: string, file: File): Promise<TaskDocument> {
+    const token = await getAccessToken();
     const formData = new FormData();
     formData.append("file", file);
     const res = await fetch(`${BASE_URL}/goals/${goalId}/tasks/${taskId}/documents`, {
       method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
       body: formData,
     });
     if (!res.ok) {
@@ -114,6 +137,11 @@ export const api = {
 
   deleteDocument: (goalId: string, taskId: string, docId: string) =>
     request<void>(`/goals/${goalId}/tasks/${taskId}/documents/${docId}`, { method: "DELETE" }),
+
+  async getDocumentUrl(_goalId: string, _taskId: string, docId: string): Promise<string> {
+    const { url } = await request<{ url: string }>(`/documents/${docId}/file`);
+    return url;
+  },
 
   // Sessions
   getSessions: (params?: { month?: string; date?: string }) => {
@@ -139,6 +167,27 @@ export const api = {
   deleteSession: (id: string) =>
     request<void>(`/sessions/${id}`, { method: "DELETE" }),
 
+  // Study Time Goals
+  getStudyTimeGoals: (date?: string) => {
+    const qs = date ? `?date=${date}` : "";
+    return request<StudyTimeGoal[]>(`/study-goals${qs}`);
+  },
+
+  createStudyTimeGoal: (payload: CreateStudyTimeGoalPayload) =>
+    request<StudyTimeGoal>("/study-goals", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  updateStudyTimeGoal: (id: string, payload: UpdateStudyTimeGoalPayload) =>
+    request<StudyTimeGoal>(`/study-goals/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteStudyTimeGoal: (id: string) =>
+    request<void>(`/study-goals/${id}`, { method: "DELETE" }),
+
   // Courses
   getCourses: () => request<Course[]>("/courses"),
 
@@ -156,6 +205,12 @@ export const api = {
 
   deleteCourse: (id: string) =>
     request<void>(`/courses/${id}`, { method: "DELETE" }),
+
+  reorderCourses: (courseIds: string[]) =>
+    request<Course[]>("/courses/reorder", {
+      method: "PUT",
+      body: JSON.stringify({ courseIds }),
+    }),
 
   // Semesters
   getSemesters: () => request<Semester[]>("/semesters"),
@@ -195,4 +250,43 @@ export const api = {
 
   deletePeriod: (id: string) =>
     request<void>(`/periods/${id}`, { method: "DELETE" }),
+
+  // AI (Gemini) — calls Next.js API routes (same origin, cookies handle auth)
+  correctExam: async (documentId: string, description?: string) => {
+    const res = await fetch("/api/correct-exam", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ documentId, description }),
+    });
+    if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
+    return res.json() as Promise<{
+      corrections: {
+        question: string;
+        issue: string;
+        modelAnswer: string;
+        explanation: string;
+      }[];
+      overallFeedback: string;
+    }>;
+  },
+
+  analyseWeakness: async (payload: {
+    description: string;
+    scores: { question: string; score: number; maxScore: number }[];
+  }) => {
+    const res = await fetch("/api/analyse-weakness", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
+    return res.json() as Promise<{
+      weaknesses: {
+        topic: string;
+        priority: string;
+        reason: string;
+        studyTips: string;
+      }[];
+    }>;
+  },
 };

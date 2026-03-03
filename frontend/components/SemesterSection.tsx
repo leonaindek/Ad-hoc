@@ -22,6 +22,8 @@ type SemesterSectionProps = {
   onUpdateCourse: (id: string, payload: UpdateCoursePayload) => void;
   onNewCourse: (periodId: string) => void;
   onNewPeriod: (semesterId: string) => void;
+  onReorderCourses?: (courseIds: string[]) => void;
+  isDragActive?: boolean;
 };
 
 export default function SemesterSection({
@@ -40,6 +42,8 @@ export default function SemesterSection({
   onUpdateCourse,
   onNewCourse,
   onNewPeriod,
+  onReorderCourses,
+  isDragActive,
 }: SemesterSectionProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [editingName, setEditingName] = useState(false);
@@ -184,6 +188,8 @@ export default function SemesterSection({
                 onDeleteCourse={onDeleteCourse}
                 onUpdateCourse={onUpdateCourse}
                 onNewCourse={onNewCourse}
+                onReorderCourses={onReorderCourses}
+                isDragActive={isDragActive}
               />
             );
           })}

@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Revision Progress",
+  title: "Ad Hoc",
   description: "Track your study progress across goals and tasks",
 };
 

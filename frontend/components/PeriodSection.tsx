@@ -2,8 +2,10 @@
 
 import { useState, useRef } from "react";
 import type { Period, Course, Goal, UpdateCoursePayload } from "@/types";
+import { SortableContext, rectSortingStrategy } from "@dnd-kit/sortable";
 import GPADisplay from "@/components/GPADisplay";
-import CourseCard from "@/components/CourseCard";
+import SortableCourseCard from "@/components/SortableCourseCard";
+import DroppableContainer from "@/components/DroppableContainer";
 import Button from "@/components/ui/Button";
 
 type PeriodSectionProps = {
@@ -18,6 +20,8 @@ type PeriodSectionProps = {
   onDeleteCourse: (id: string) => void;
   onUpdateCourse: (id: string, payload: UpdateCoursePayload) => void;
   onNewCourse: (periodId: string) => void;
+  onReorderCourses?: (courseIds: string[]) => void;
+  isDragActive?: boolean;
 };
 
 /** Returns courses that belong to this period — either via periodId or via parts */
@@ -42,6 +46,8 @@ export default function PeriodSection({
   onDeleteCourse,
   onUpdateCourse,
   onNewCourse,
+  onReorderCourses,
+  isDragActive,
 }: PeriodSectionProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [editingName, setEditingName] = useState(false);
@@ -50,6 +56,7 @@ export default function PeriodSection({
 
   // Compute courses for this period (including split courses)
   const periodCourses = coursesForPeriod(allCourses, period.id);
+  const sortedPeriodCourses = [...periodCourses].sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity));
 
   function startEditing() {
     setNameDraft(period.name);
@@ -124,21 +131,30 @@ export default function PeriodSection({
 
       {/* Course grid */}
       {!collapsed && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {periodCourses.map((course) => (
-            <CourseCard
-              key={course.id}
-              course={course}
-              goals={goals}
-              allCourses={allCourses}
-              allPeriods={allPeriods}
-              allSemesters={allSemesters}
-              periodContext={period.id}
-              onDelete={onDeleteCourse}
-              onUpdate={onUpdateCourse}
-            />
-          ))}
-        </div>
+        <DroppableContainer id={`period:${period.id}`}>
+          <SortableContext items={sortedPeriodCourses.map((c) => c.id)} strategy={rectSortingStrategy}>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 min-h-[60px]">
+              {sortedPeriodCourses.length === 0 && isDragActive && (
+                <div className="col-span-full flex items-center justify-center rounded-lg border-2 border-dashed border-border text-sm text-muted py-4">
+                  Drop courses here
+                </div>
+              )}
+              {sortedPeriodCourses.map((course) => (
+                <SortableCourseCard
+                  key={course.id}
+                  course={course}
+                  goals={goals}
+                  allCourses={allCourses}
+                  allPeriods={allPeriods}
+                  allSemesters={allSemesters}
+                  periodContext={period.id}
+                  onDelete={onDeleteCourse}
+                  onUpdate={onUpdateCourse}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DroppableContainer>
       )}
     </div>
   );

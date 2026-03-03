@@ -33,6 +33,7 @@ export interface Goal {
   title: string;
   dueDate?: string;
   tasks: Task[];
+  order?: number;
   createdAt: string;
 }
 
@@ -110,6 +111,7 @@ export interface Course {
   goalGrades: Record<string, string>;
   periodId?: string;
   parts?: CoursePart[];
+  order?: number;
   createdAt: string;
 }
 
@@ -128,6 +130,16 @@ export type UpdateCoursePayload = Partial<Omit<CreateCoursePayload, "periodId" |
   periodId?: string | null;
   parts?: CoursePart[] | null;
 };
+
+// Study Time Goals
+export interface StudyTimeGoal {
+  id: string;
+  date: string;
+  targetMinutes: number;
+  createdAt: string;
+}
+export type CreateStudyTimeGoalPayload = { date: string; targetMinutes: number };
+export type UpdateStudyTimeGoalPayload = Partial<Pick<StudyTimeGoal, "targetMinutes">>;
 
 export type CreateSessionPayload = {
   taskId: string;

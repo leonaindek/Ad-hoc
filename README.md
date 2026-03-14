@@ -11,3 +11,4 @@
 ### ☆ Brainstorma namn (internationellt)
 ### ☆ Formulera USP och slogan (ex: intelligent life planner, intelligent time management...)
 ### ☆ Agile development pyramid (ordning)
+### ☆ Mountains climbed, (AI designs the mountain)
